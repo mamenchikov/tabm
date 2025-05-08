@@ -260,6 +260,8 @@ def run(function: Callable[..., None | JSONDict]) -> None | JSONDict:
     parser.add_argument('config')
     parser.add_argument('--output')
     parser.add_argument('--force', action='store_true')
+    parser.add_argument('--freeze', action='store_true')
+    parser.add_argument('--model_path')
     if 'continue_' in inspect.signature(function).parameters:
         parser.add_argument('--continue', action='store_true', dest='continue_')
 

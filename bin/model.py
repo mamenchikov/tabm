@@ -1,9 +1,15 @@
+import warnings
+warnings.filterwarnings("ignore")
+
 import math
 import shutil
 import statistics
 import sys
 from pathlib import Path
 from typing import Any, Literal
+
+from numpy import savetxt
+import h5py
 
 import delu
 import numpy as np
@@ -331,6 +337,8 @@ def main(
     output: None | str | Path = None,
     *,
     force: bool = False,
+    freeze: bool = False,
+    model_path: str | None = None,
 ) -> None | lib.JSONDict:
     # >>> Start
     config, output = lib.check(config, output, config_type=Config)
@@ -568,8 +576,44 @@ def main(
         )
         lib.dump_report(output, report)
         lib.backup_output(output)
+        
+    if model_path is not None:
+        model.load_state_dict(torch.load(model_path))
 
-    print()
+    if freeze: # How to check this part???
+        for p in model.parameters():
+            p.requires_grad = False
+            
+        for p in model.num_module.periodic.parameters():
+            p.requires_grad = True
+
+    # Make empty tensors for weights and losses
+    if hasattr(model.num_module, 'periodic'):
+        weights_shape = model.num_module.periodic.weight.shape
+    with h5py.File(str(output) + '/exp_data.h5', 'w') as f:
+        if hasattr(model.num_module, 'periodic'):
+            f.create_dataset(
+                'weights',
+                shape=tuple([1] + list(weights_shape)),
+                maxshape=tuple([None] + list(weights_shape)),
+                dtype=np.float32
+            )
+            f['weights'][0,:] = model.num_module.periodic.weight.detach().cpu().numpy()
+        
+        f.create_dataset(
+            'losses',
+            shape=(1, 1),
+            maxshape=(1, None),
+            dtype=np.float32
+        )
+        
+    num_trn_params = 0
+    for p in model.parameters():
+        if p.requires_grad:
+            num_trn_params += p.numel()
+            
+    print(f"Number of trainable parameters: {num_trn_params}")
+
     timer.run()
     while config['n_epochs'] == -1 or step // epoch_size < config['n_epochs']:
         print(f'[...] {lib.try_get_relative_path(output)} | {timer}')
@@ -594,6 +638,7 @@ def main(
                 .split(batch_size, dim=1)
             ]
         )
+
         for batch_idx in tqdm(batches, desc=f'Epoch {step // epoch_size} Step {step}'):
             optimizer.zero_grad()
             loss = loss_fn(apply_model('train', batch_idx), Y_train[batch_idx])
@@ -624,7 +669,16 @@ def main(
 
             step += 1
             epoch_losses.append(loss.detach())
-
+            
+            # Add new weights and losses
+            with h5py.File(str(output) + '/exp_data.h5', 'a') as f:
+                if hasattr(model.num_module, 'periodic'):
+                    f['weights'].resize((f['weights'].shape[0] + 1), axis=0)
+                    f['weights'][-1,:] = model.num_module.periodic.weight.detach().cpu().numpy()
+                
+                f['losses'].resize((f['losses'].shape[1] + 1), axis=1)
+                f['losses'][0,-1] = loss.item()
+            
         epoch_losses = torch.stack(epoch_losses).tolist()
         mean_loss = statistics.mean(epoch_losses)
         metrics, predictions, _, eval_batch_size = evaluate(
@@ -790,6 +844,7 @@ def main(
         )
 
     lib.finish(output, report)
+    torch.save(model.state_dict(), str(output) + '/model_state_dict.pth')
     return report
 
 
